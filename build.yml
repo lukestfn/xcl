@@ -1,34 +1,37 @@
-# Builds xcl.exe (release) on a GitHub Windows runner and uploads it as a downloadable
-# artifact (Actions -> this run -> Artifacts -> xcl-windows-x64). Pushing a tag v* also
-# attaches the zip to a GitHub release.
+# Build + tests on a GitHub Windows runner: no GPU and no game data, so the GPU tests skip
+# (each prints "SKIPPED <test>: <reason>", counted at the end of scripts/test.ps1) and the
+# tests on game data pass without running. What it checks on every push and pull request:
+# the workspace builds, the unit / integration tests pass, and the recompiler's HLSL compiles
+# with the runner's DXC (Windows SDK).
 #
-# The zip holds only XCL's own files. DXC (dxcompiler.dll / dxil.dll), the D3D12 Agility SDK
-# and XGameRuntime come from your own system / the Windows SDK, as described in README.md.
-name: Build xcl.exe
+# Left out: the test title's end-to-end run (`test_title_runs_and_game_folder_is_untouched`).
+# The runner has no System32\xgameruntime.dll (Gaming Services) and only the Microsoft Basic
+# Render Driver (4-lane waves): the launcher warns about both, which that test treats as a
+# failure. It still runs in `scripts/test.ps1` on a PC.
+name: CI
 
 on:
-  workflow_dispatch:
   push:
-    branches: [main, build-exe]
-    tags: ['v*']
+    branches: [main]
+  pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: build-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: Build release (Windows x64)
+  windows:
+    name: Build and test (Windows, no GPU)
     runs-on: windows-2025
-    timeout-minutes: 60
+    timeout-minutes: 45
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Rust (stable, MSVC)
         run: |
@@ -36,38 +39,16 @@ jobs:
           rustup default stable
           rustc --version
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-release-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('**/Cargo.toml') }}
-          restore-keys: cargo-release-${{ runner.os }}-
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
 
-      - name: Build
-        run: cargo build --release --workspace
-
-      - name: Package
+      - name: Build and test
         shell: pwsh
-        run: |
-          $out = "dist\xcl"
-          New-Item -ItemType Directory -Force $out | Out-Null
-          Copy-Item target\release\xcl.exe $out
-          if (Test-Path target\release\xcl.pdb) { Copy-Item target\release\xcl.pdb $out }
-          foreach ($f in 'README.md', 'LICENSE', 'THIRD_PARTY.md') { if (Test-Path $f) { Copy-Item $f $out } }
-          Compress-Archive -Path "$out\*" -DestinationPath dist\xcl-windows-x64.zip
-          Get-ChildItem $out
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: xcl-windows-x64
-          path: dist/xcl/
-          if-no-files-found: error
-
-      - name: Release (tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/xcl-windows-x64.zip
+        run: ./scripts/test.ps1 --skip test_title_runs_and_game_folder_is_untouched
